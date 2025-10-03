@@ -1,0 +1,56 @@
+﻿name: Salesforce JWT CI Test
+on:
+  workflow_dispatch:   # allows you to run manually from the Actions tab
+
+jobs:
+  jwt-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Write private key (from GitHub Secret)
+        env:
+          SF_JWT_KEY_B64: ${{ secrets.SF_JWT_KEY_B64 }}
+        run: |
+          echo "$SF_JWT_KEY_B64" | base64 --decode > server.key
+          chmod 600 server.key
+          echo "server.key written (size: $(wc -c < server.key) bytes)"
+
+      - name: Mint JWT (creates assertion.jwt)
+        env:
+          SF_CONSUMER_KEY: ${{ secrets.SF_CONSUMER_KEY }}
+          SF_USERNAME: ${{ secrets.SF_USERNAME }}
+          SF_LOGIN_URL: ${{ secrets.SF_LOGIN_URL }}
+        run: |
+          node ./mint-jwt.js > assertion.jwt
+          echo "assertion.jwt size: $(wc -c < assertion.jwt) bytes"
+
+      - name: Exchange JWT for OAuth token
+        env:
+          SF_LOGIN_URL: ${{ secrets.SF_LOGIN_URL }}
+        run: |
+          curl -s ${SF_LOGIN_URL}/services/oauth2/token \
+            -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer \
+            --data-urlencode assertion@"assertion.jwt" > token.json
+          echo "Token response:"
+          cat token.json
+          if ! jq -e .access_token token.json >/dev/null 2>&1; then
+            echo "No access_token in token.json — failing job"
+            exit 1
+          fi
+
+      - name: Example SOQL query (prints 3 Accounts)
+        run: |
+          ACCESS_TOKEN=$(jq -r .access_token token.json)
+          INSTANCE_URL=$(jq -r .instance_url token.json)
+          curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "$INSTANCE_URL/services/data/v61.0/query?q=SELECT+Id,Name+FROM+Account+LIMIT+3" | jq
